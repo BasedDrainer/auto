@@ -1,4 +1,5 @@
-(async () => {
+<div class="wplace-stat-item">
+            <div class="wplace-stat-label"><i class="fas fa-crosshairs"></i> Position</div(async () => {
   const CONFIG = {
     START_X: 742,
     START_Y: 1148,
@@ -23,34 +24,79 @@
     lastPixel: null,
     minimized: false,
     menuOpen: false,
-    debug: true // Enable debug mode
+    debug: true, // Enable debug mode
+    selectingPosition: false,
+    startPosition: null,
+    region: null,
+    debugLog: [] // Store debug messages
   };
 
   // CAPTCHA Token Storage
   let capturedCaptchaToken = null;
+
+  // Debug logging function
+  const debugLog = (message, type = 'info') => {
+    const timestamp = new Date().toLocaleTimeString();
+    const logEntry = { timestamp, message, type };
+    state.debugLog.push(logEntry);
+    
+    // Keep only last 50 entries
+    if (state.debugLog.length > 50) {
+      state.debugLog.shift();
+    }
+    
+    // Update debug display
+    updateDebugDisplay();
+    
+    // Console log with emoji
+    const emoji = type === 'error' ? '❌' : type === 'success' ? '✅' : type === 'warning' ? '⚠️' : '📝';
+    console.log(`${emoji} [${timestamp}] ${message}`);
+  };
 
   // CAPTCHA Bypass System - Intercept fetch requests
   const originalFetch = window.fetch;
   window.fetch = async (url, options) => {
     // Debug: Log all WPlace requests
     if (typeof url === "string" && url.includes("backend.wplace.live")) {
-      console.log("🔍 WPlace Request:", url, options);
+      debugLog(`WPlace Request: ${url}`, 'info');
     }
 
     // Check if the request is for painting a pixel
     if (typeof url === "string" && url.includes("https://backend.wplace.live/s0/pixel/")) {
       try {
         const payload = JSON.parse(options.body);
+        
+        // Capture position when user paints manually
+        if (state.selectingPosition && payload.coords) {
+          debugLog(`Position selected: (${payload.coords[0]}, ${payload.coords[1]})`, 'success');
+          
+          // Extract region from URL
+          const regionMatch = url.match(/\/pixel\/(\d+)\/(\d+)/);
+          if (regionMatch) {
+            state.region = {
+              x: parseInt(regionMatch[1]),
+              y: parseInt(regionMatch[2])
+            };
+            
+            state.startPosition = {
+              x: payload.coords[0],
+              y: payload.coords[1]
+            };
+            
+            state.selectingPosition = false;
+            debugLog(`Region captured: ${state.region.x}, ${state.region.y}`, 'success');
+            updateUI("✅ Position set! You can now start farming.", "success");
+          }
+        }
+        
         // If the request body contains the 't' field, capture it
         if (payload.t) {
-          console.log("✅ CAPTCHA Token Captured:", payload.t);
           capturedCaptchaToken = payload.t;
-          
-          // Update UI to show token captured
+          debugLog(`CAPTCHA Token Captured: ${payload.t.substring(0, 20)}...`, 'success');
           updateUI("🔑 CAPTCHA token captured! Ready to farm.", "success");
         }
       } catch (e) {
-        // Ignore JSON parse errors
+        debugLog(`Error parsing pixel request: ${e.message}`, 'error');
       }
     }
     
@@ -103,22 +149,26 @@
     
     // Check if we have a CAPTCHA token
     if (!capturedCaptchaToken) {
-      console.warn("⚠️ No CAPTCHA token available");
+      debugLog("No CAPTCHA token available", 'error');
       return { error: "No CAPTCHA token" };
     }
     
+    // Use captured position if available, otherwise use the configured start position
+    const targetX = state.startPosition ? state.startPosition.x + x : CONFIG.START_X + x;
+    const targetY = state.startPosition ? state.startPosition.y + y : CONFIG.START_Y + y;
+    const regionX = state.region ? state.region.x : CONFIG.START_X;
+    const regionY = state.region ? state.region.y : CONFIG.START_Y;
+    
     const payload = {
-      coords: [x, y],
+      coords: [targetX, targetY],
       colors: [randomColor],
-      t: capturedCaptchaToken // Include the captured token
+      t: capturedCaptchaToken
     };
     
-    if (state.debug) {
-      console.log(`🎨 Painting pixel at (${x}, ${y}) with color ${randomColor}`);
-      console.log("📦 Payload:", payload);
-    }
+    debugLog(`Painting pixel at global (${targetX}, ${targetY}) with color ${randomColor}`, 'info');
+    debugLog(`Payload: ${JSON.stringify(payload)}`, 'info');
     
-    const result = await fetchAPI(`https://backend.wplace.live/s0/pixel/${CONFIG.START_X}/${CONFIG.START_Y}`, {
+    const result = await fetchAPI(`https://backend.wplace.live/s0/pixel/${regionX}/${regionY}`, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
       body: JSON.stringify(payload)
@@ -126,12 +176,13 @@
     
     // Handle token expiration
     if (result.error && result.error.includes('403')) {
-      console.error("🔑 CAPTCHA token expired or invalid");
+      debugLog("CAPTCHA token expired or invalid - 403 Forbidden", 'error');
       capturedCaptchaToken = null;
       updateUI("❌ CAPTCHA token expired. Paint a pixel manually to get new token.", "error");
       return { error: "Token expired" };
     }
     
+    debugLog(`Paint result: ${JSON.stringify(result)}`, result.painted === 1 ? 'success' : 'error');
     return result;
   };
 
@@ -156,33 +207,38 @@
   };
 
   const paintLoop = async () => {
-    console.log("🚀 Starting paint loop...");
+    debugLog("Starting paint loop...", 'info');
     
     while (state.running) {
       const { count, cooldownMs } = state.charges;
       
       // Check if we have a CAPTCHA token
       if (!capturedCaptchaToken) {
+        debugLog("Waiting for CAPTCHA token...", 'warning');
         updateUI("🔑 CAPTCHA token needed. Paint one pixel manually to continue.", "error");
-        await sleep(5000); // Wait 5 seconds before checking again
+        await sleep(5000);
         continue;
       }
       
       if (count < 1) {
+        debugLog(`No charges available. Waiting ${Math.ceil(cooldownMs/1000)}s...`, 'warning');
         updateUI(`⌛ No charges. Waiting ${Math.ceil(cooldownMs/1000)}s...`, 'default');
         await sleep(cooldownMs);
         await getCharge();
         continue;
       }
 
-      const randomPos = getRandomPosition();
-      const paintResult = await paintPixel(randomPos.x, randomPos.y);
+      // Paint at the selected position (0,0 relative to start position)
+      const paintResult = await paintPixel(0, 0);
       
       if (paintResult?.painted === 1) {
         state.paintedCount++;
+        const actualX = state.startPosition ? state.startPosition.x : CONFIG.START_X;
+        const actualY = state.startPosition ? state.startPosition.y : CONFIG.START_Y;
+        
         state.lastPixel = { 
-          x: CONFIG.START_X + randomPos.x,
-          y: CONFIG.START_Y + randomPos.y,
+          x: actualX,
+          y: actualY,
           time: new Date() 
         };
         state.charges.count--;
@@ -192,26 +248,26 @@
           document.getElementById('paintEffect').style.animation = '';
         }, 500);
         
+        debugLog(`Successfully painted pixel ${state.paintedCount} at (${actualX}, ${actualY})`, 'success');
         updateUI('✅ Pixel painted successfully!', 'success');
-        console.log(`✅ Painted pixel ${state.paintedCount} at (${randomPos.x}, ${randomPos.y})`);
       } else if (paintResult?.error) {
+        debugLog(`Paint failed: ${paintResult.error}`, 'error');
         updateUI(`❌ Failed: ${paintResult.error}`, 'error');
-        console.error("❌ Paint failed:", paintResult.error);
         
         // If token error, stop the loop
         if (paintResult.error.includes('Token') || paintResult.error.includes('403')) {
-          await sleep(10000); // Wait longer on token errors
+          await sleep(10000);
         }
       } else {
+        debugLog(`Paint failed with unknown error: ${JSON.stringify(paintResult)}`, 'error');
         updateUI('❌ Failed to paint (unknown error)', 'error');
-        console.error("❌ Paint failed with unknown error:", paintResult);
       }
 
       await sleep(CONFIG.DELAY);
       await updateStats();
     }
     
-    console.log("⏹️ Paint loop stopped");
+    debugLog("Paint loop stopped", 'info');
   };
 
   const createUI = () => {
@@ -376,6 +432,47 @@
         margin-bottom: 4px;
         color: #ffeb3b;
       }
+      .debug-log {
+        max-height: 200px;
+        overflow-y: auto;
+        background: rgba(0,0,0,0.3);
+        padding: 8px;
+        border-radius: 4px;
+        font-family: monospace;
+        font-size: 10px;
+        line-height: 1.2;
+        margin-top: 8px;
+      }
+      .debug-log-entry {
+        margin-bottom: 2px;
+        padding: 2px 4px;
+        border-radius: 2px;
+      }
+      .debug-log-entry.info { color: #81c784; }
+      .debug-log-entry.success { color: #4caf50; }
+      .debug-log-entry.warning { color: #ff9800; }
+      .debug-log-entry.error { color: #f44336; }
+      .debug-tabs {
+        display: flex;
+        gap: 4px;
+        margin-bottom: 8px;
+      }
+      .debug-tab {
+        padding: 4px 8px;
+        background: rgba(255,255,255,0.1);
+        border: none;
+        border-radius: 3px;
+        color: white;
+        font-size: 10px;
+        cursor: pointer;
+        transition: background 0.2s;
+      }
+      .debug-tab.active {
+        background: rgba(255,255,255,0.3);
+      }
+      .debug-tab:hover {
+        background: rgba(255,255,255,0.2);
+      }
     `;
     document.head.appendChild(style);
 
@@ -400,11 +497,31 @@
       <div class="wplace-content">
         <div class="debug-section" id="debugSection">
           <div class="debug-title">🔍 Debug Info</div>
-          <div id="debugInfo">CAPTCHA Token: <span id="tokenStatus">❌ Not captured</span></div>
+          <div class="debug-tabs">
+            <button class="debug-tab active" data-tab="status">Status</button>
+            <button class="debug-tab" data-tab="log">Log</button>
+          </div>
+          <div id="debugStatus" class="debug-tab-content">
+            <div id="debugInfo">
+              <div>CAPTCHA Token: <span id="tokenStatus">❌ Not captured</span></div>
+              <div>Position: <span id="positionStatus">❌ Not set</span></div>
+              <div>Region: <span id="regionStatus">❌ Not set</span></div>
+            </div>
+          </div>
+          <div id="debugLog" class="debug-tab-content debug-log" style="display: none;">
+            <!-- Debug log entries will be inserted here -->
+          </div>
         </div>
         
         <div class="wplace-controls">
-          <button id="toggleBtn" class="wplace-btn wplace-btn-primary">
+          <button id="selectPosBtn" class="wplace-btn wplace-btn-primary">
+            <i class="fas fa-crosshairs"></i>
+            <span>Select Position</span>
+          </button>
+        </div>
+        
+        <div class="wplace-controls">
+          <button id="toggleBtn" class="wplace-btn wplace-btn-primary" disabled>
             <i class="fas fa-play"></i>
             <span>Start Farming</span>
           </button>
@@ -419,7 +536,9 @@
         </div>
         
         <div id="statusText" class="wplace-status status-default">
-          🔑 Paint one pixel manually to capture CAPTCHA token, then start farming.
+          1. Click "Select Position"<br>
+          2. Paint one pixel where you want to farm<br>
+          3. Click "Start Farming"
         </div>
       </div>
     `;
@@ -459,6 +578,7 @@
     }
     
     const toggleBtn = panel.querySelector('#toggleBtn');
+    const selectPosBtn = panel.querySelector('#selectPosBtn');
     const minimizeBtn = panel.querySelector('#minimizeBtn');
     const debugBtn = panel.querySelector('#debugBtn');
     const statusText = panel.querySelector('#statusText');
@@ -466,9 +586,63 @@
     const statsArea = panel.querySelector('#statsArea');
     const debugSection = panel.querySelector('#debugSection');
     
+    // Debug tab functionality
+    const debugTabs = panel.querySelectorAll('.debug-tab');
+    const debugTabContents = {
+      status: panel.querySelector('#debugStatus'),
+      log: panel.querySelector('#debugLog')
+    };
+    
+    debugTabs.forEach(tab => {
+      tab.addEventListener('click', () => {
+        const tabName = tab.dataset.tab;
+        
+        // Update active tab
+        debugTabs.forEach(t => t.classList.remove('active'));
+        tab.classList.add('active');
+        
+        // Show/hide content
+        Object.values(debugTabContents).forEach(content => content.style.display = 'none');
+        debugTabContents[tabName].style.display = 'block';
+      });
+    });
+    
+    selectPosBtn.addEventListener('click', () => {
+      if (state.selectingPosition) return;
+      
+      state.selectingPosition = true;
+      state.startPosition = null;
+      state.region = null;
+      toggleBtn.disabled = true;
+      
+      selectPosBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> <span>Waiting...</span>';
+      selectPosBtn.disabled = true;
+      
+      debugLog("Position selection started. Paint a pixel where you want to farm.", 'info');
+      updateUI("👆 Paint one pixel where you want to farm!", "default");
+      
+      // Set timeout for position selection
+      setTimeout(() => {
+        if (state.selectingPosition) {
+          state.selectingPosition = false;
+          selectPosBtn.innerHTML = '<i class="fas fa-crosshairs"></i> <span>Select Position</span>';
+          selectPosBtn.disabled = false;
+          debugLog("Position selection timed out", 'error');
+          updateUI("❌ Position selection timed out. Try again.", "error");
+        }
+      }, 120000); // 2 minutes timeout
+    });
+    
     toggleBtn.addEventListener('click', () => {
       if (!capturedCaptchaToken) {
+        debugLog("Cannot start: No CAPTCHA token", 'error');
         updateUI("🔑 Please paint one pixel manually first to capture CAPTCHA token!", "error");
+        return;
+      }
+      
+      if (!state.startPosition) {
+        debugLog("Cannot start: No position selected", 'error');
+        updateUI("📍 Please select a position first by clicking 'Select Position'!", "error");
         return;
       }
       
@@ -478,12 +652,14 @@
         toggleBtn.innerHTML = `<i class="fas fa-stop"></i> <span>Stop Farming</span>`;
         toggleBtn.classList.remove('wplace-btn-primary');
         toggleBtn.classList.add('wplace-btn-stop');
+        debugLog("Auto-farming started", 'success');
         updateUI('🚀 Auto-farming started!', 'success');
         paintLoop();
       } else {
         toggleBtn.innerHTML = `<i class="fas fa-play"></i> <span>Start Farming</span>`;
         toggleBtn.classList.add('wplace-btn-primary');
         toggleBtn.classList.remove('wplace-btn-stop');
+        debugLog("Auto-farming paused", 'info');
         updateUI('⏸️ Auto-farming paused', 'default');
       }
     });
@@ -502,14 +678,60 @@
     });
     
     // Update debug info periodically
-    setInterval(() => {
+    const updateDebugDisplay = () => {
       const tokenStatus = document.getElementById('tokenStatus');
+      const positionStatus = document.getElementById('positionStatus');
+      const regionStatus = document.getElementById('regionStatus');
+      
       if (tokenStatus) {
         tokenStatus.innerHTML = capturedCaptchaToken ? 
           `✅ ${capturedCaptchaToken.substring(0, 10)}...` : 
           '❌ Not captured';
       }
-    }, 1000);
+      
+      if (positionStatus) {
+        positionStatus.innerHTML = state.startPosition ? 
+          `✅ (${state.startPosition.x}, ${state.startPosition.y})` : 
+          '❌ Not set';
+      }
+      
+      if (regionStatus) {
+        regionStatus.innerHTML = state.region ? 
+          `✅ (${state.region.x}, ${state.region.y})` : 
+          '❌ Not set';
+      }
+      
+      // Update debug log
+      const debugLogElement = document.getElementById('debugLog');
+      if (debugLogElement && state.debugLog.length > 0) {
+        debugLogElement.innerHTML = state.debugLog
+          .slice(-20) // Show last 20 entries
+          .map(entry => `
+            <div class="debug-log-entry ${entry.type}">
+              [${entry.timestamp}] ${entry.message}
+            </div>
+          `).join('');
+        
+        // Auto-scroll to bottom
+        debugLogElement.scrollTop = debugLogElement.scrollHeight;
+      }
+      
+      // Update button states
+      const canStart = capturedCaptchaToken && state.startPosition && !state.running;
+      if (toggleBtn) {
+        toggleBtn.disabled = !canStart;
+      }
+      
+      if (selectPosBtn && !state.selectingPosition) {
+        selectPosBtn.innerHTML = '<i class="fas fa-crosshairs"></i> <span>Select Position</span>';
+        selectPosBtn.disabled = false;
+      }
+    };
+    
+    // Make updateDebugDisplay available globally
+    window.updateDebugDisplay = updateDebugDisplay;
+    
+    setInterval(updateDebugDisplay, 1000);
     
     window.addEventListener('beforeunload', () => {
       state.menuOpen = false;
@@ -549,6 +771,10 @@
           <div>${state.userInfo?.level || '0'}</div>
         </div>
         <div class="wplace-stat-item">
+          <div class="wplace-stat-label"><i class="fas fa-crosshairs"></i> Position</div>
+          <div>${state.startPosition ? `(${state.startPosition.x}, ${state.startPosition.y})` : 'Not set'}</div>
+        </div>
+        <div class="wplace-stat-item">
           <div class="wplace-stat-label"><i class="fas fa-key"></i> Token</div>
           <div>${capturedCaptchaToken ? '✅' : '❌'}</div>
         </div>
@@ -557,11 +783,12 @@
   };
 
   // Initialize
-  console.log("🔧 WPlace Auto-Farm with CAPTCHA Bypass initialized");
-  console.log("📋 Instructions:");
-  console.log("1. Paint ONE pixel manually to capture CAPTCHA token");
-  console.log("2. Click 'Start Farming' to begin auto-farming");
-  console.log("3. Check debug panel for token status");
+  debugLog("WPlace Auto-Farm with CAPTCHA Bypass initialized", 'info');
+  debugLog("Instructions:", 'info');
+  debugLog("1. Click 'Select Position'", 'info');
+  debugLog("2. Paint ONE pixel where you want to farm", 'info');
+  debugLog("3. Click 'Start Farming' to begin auto-farming", 'info');
+  debugLog("4. Check debug log for detailed events", 'info');
   
   createUI();
   await getCharge();
